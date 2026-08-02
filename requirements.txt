@@ -1,0 +1,14 @@
+ccxt
+pandas
+numpy
+tradingview_ta
+colorama
+requests
+telethon
+vaderSentiment
+python-dotenv
+yfinance
+prometheus-client
+# --- Data Aggregator yeni bağımlılıklar ---
+websockets>=12.0
+aiohttp>=3.9.0

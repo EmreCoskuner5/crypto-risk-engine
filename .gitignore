@@ -1,0 +1,27 @@
+# API Keys and Secrets (CRITICAL)
+.env
+anon.session
+
+# Python Virtual Environment
+venv/
+env/
+.venv/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS specific
+.DS_Store
+
+# IDE and Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Trade logs and data (Optional but recommended to keep private)
+*.csv
+*.log
