@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from atomic_trader.data.base import DataEvent
@@ -115,3 +116,132 @@ class FeatureStore:
         syms = len(self._latest)
         total = sum(self._event_counts.values())
         return f"FeatureStore(symbols={syms}, total_events={total})"
+
+    # ── Derived Metrics ──────────────────────────────────────────────────────────
+
+    def get_atr(self, symbol: str, period: int = 14) -> float | None:
+        """
+        Compute Average True Range (ATR) from high/low/close history.
+        Requires high, low, close features to be available from data sources.
+
+        ATR = SMA(TR, period) where TR = max(H-L, |H-C_prev|, |L-C_prev|)
+        """
+        # Try to get OHLC data from different sources
+        high_series = self.get_history(symbol, "high", n=period + 5)
+        low_series = self.get_history(symbol, "low", n=period + 5)
+        close_series = self.get_history(symbol, "close", n=period + 5)
+
+        # Fallback: try 24h high/low from Binance ticker
+        if high_series.empty or low_series.empty or close_series.empty:
+            high_24h = self.get(symbol, "high_24h")
+            low_24h = self.get(symbol, "low_24h")
+            price = self.get(symbol, "price")
+            if high_24h and low_24h and price:
+                # Approximate ATR from 24h range (not ideal but better than nothing)
+                return float(high_24h - low_24h) * 0.5  # Rough approximation
+            return None
+
+        # Ensure we have enough aligned data
+        min_len = min(len(high_series), len(low_series), len(close_series))
+        if min_len < period + 1:
+            return None
+
+        # Align series by index
+        high_vals = high_series.values[-min_len:]
+        low_vals = low_series.values[-min_len:]
+        close_vals = close_series.values[-min_len:]
+
+        # Compute True Range
+        prev_close = np.roll(close_vals, 1)
+        prev_close[0] = close_vals[0]  # First element has no previous
+
+        tr1 = high_vals - low_vals
+        tr2 = np.abs(high_vals - prev_close)
+        tr3 = np.abs(low_vals - prev_close)
+
+        true_range = np.maximum(np.maximum(tr1, tr2), tr3)
+
+        # ATR = SMA of True Range
+        atr = pd.Series(true_range).rolling(window=period).mean().iloc[-1]
+
+        return float(atr) if not np.isnan(atr) else None
+
+    def get_atr_percentile(self, symbol: str, lookback: int = 100, period: int = 14) -> float | None:
+        """
+        Compute ATR percentile over lookback period.
+        Returns 0-1 indicating where current ATR sits in historical distribution.
+        """
+        # Build rolling ATR series
+        high_series = self.get_history(symbol, "high", n=lookback + period)
+        low_series = self.get_history(symbol, "low", n=lookback + period)
+        close_series = self.get_history(symbol, "close", n=lookback + period)
+
+        if high_series.empty or low_series.empty or close_series.empty:
+            return None
+
+        min_len = min(len(high_series), len(low_series), len(close_series))
+        if min_len < period + 10:
+            return None
+
+        high_vals = high_series.values[-min_len:]
+        low_vals = low_series.values[-min_len:]
+        close_vals = close_series.values[-min_len:]
+
+        prev_close = np.roll(close_vals, 1)
+        prev_close[0] = close_vals[0]
+
+        tr1 = high_vals - low_vals
+        tr2 = np.abs(high_vals - prev_close)
+        tr3 = np.abs(low_vals - prev_close)
+
+        true_range = np.maximum(np.maximum(tr1, tr2), tr3)
+        atr_series = pd.Series(true_range).rolling(window=period).mean().dropna()
+
+        if len(atr_series) < 20:
+            return None
+
+        current_atr = atr_series.iloc[-1]
+        # Percentile rank
+        percentile = (atr_series < current_atr).mean()
+
+        return float(percentile)
+
+    def get_volatility_target_size(
+        self,
+        symbol: str,
+        equity: float,
+        target_vol_pct: float = 0.02,  # 2% daily vol target
+        period: int = 14,
+    ) -> float | None:
+        """
+        Calculate position size targeting a specific portfolio volatility.
+
+        Formula: position_size = (equity * target_vol) / (asset_vol * sqrt(252))
+
+        For daily data: asset_vol = ATR / price (daily)
+        """
+        atr = self.get_atr(symbol, period)
+        price = self.get(symbol, "price") or self.get(symbol, "close")
+
+        if atr is None or price is None or price <= 0:
+            return None
+
+        # Daily volatility estimate from ATR
+        daily_vol = atr / price
+
+        if daily_vol <= 0:
+            return None
+
+        # Target volatility per trade (annualized target -> daily)
+        daily_target_vol = target_vol_pct / np.sqrt(252)
+
+        # Position size as fraction of equity
+        position_fraction = daily_target_vol / daily_vol
+
+        # Cap at reasonable limits (e.g., max 20% of equity per trade)
+        position_fraction = min(position_fraction, 0.20)
+        position_fraction = max(position_fraction, 0.001)
+
+        position_size = equity * position_fraction / price
+
+        return position_size

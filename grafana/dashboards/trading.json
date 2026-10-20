@@ -1,0 +1,62 @@
+{
+  "title": "Risk Engine Command Center",
+  "timezone": "browser",
+  "refresh": "5s",
+  "panels": [
+    {
+      "title": "Live Capital",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "capital",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      }
+    },
+    {
+      "title": "Open Positions",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "targets": [
+        {
+          "expr": "open_positions",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Floating PnL",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "targets": [
+        {
+          "expr": "total_pnl",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Recent Closed Trades (ClickHouse)",
+      "type": "table",
+      "datasource": "ClickHouse",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "query": "SELECT timestamp, symbol, direction, size, entry_price, pnl, reason FROM trading.trade_logs ORDER BY timestamp DESC LIMIT 50",
+          "rawQuery": true,
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38
+}

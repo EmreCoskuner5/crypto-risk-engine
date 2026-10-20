@@ -1,59 +1,149 @@
-# 🚀 Atomic Trader (Crypto Risk Engine)
+# 🚀 Crypto Risk Engine & Execution Architecture
 
-Atomic Trader is an advanced, event-driven algorithmic trading bot for cryptocurrency markets. Designed to operate safely in high-volatility environments, it incorporates real-time multi-source data aggregation, software-managed risk controls, and automated portfolio management.
+[![CI](https://github.com/EmreCoskuner5/crypto-risk-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/EmreCoskuner5/crypto-risk-engine/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)](#)
+[![Tests: 20/20 Passing](https://img.shields.io/badge/tests-20%2F20%20passing-brightgreen.svg)](#-test-suite)
 
-## ✨ Features
+An institutional-grade, fully asynchronous Cryptocurrency Trading, Risk Management, and Execution architecture. Built for high-frequency data ingestion, real-time risk assessment, robust backtesting, and bulletproof automated execution.
 
-- **Multi-Source Data Aggregation**: Ingests live data from Binance, Bybit, CoinGlass, TradingView, and Yahoo Finance concurrently.
-- **Event-Driven Architecture**: Uses a robust `DataBus` to asynchronously distribute market events across the system without blocking the main event loop.
-- **Software-Managed SL/TP**: In environments where native exchange algorithmic endpoints are restricted (e.g., Binance Testnet), the bot handles Stop Loss (-2%) and Take Profit (+5%) entirely via software logic, dynamically closing positions when targets are hit.
-- **Data Freshness Shield**: Continuously monitors the age of market data. If the data goes stale (e.g., websocket disconnects or internet drops), the bot automatically halts trading decisions to prevent executing on ghost prices.
-- **System Sleep Prevention**: Uses macOS `caffeinate` to strictly prevent system and display sleep modes during live trading, ensuring uninterrupted websocket connections.
-- **Live Metrics Dashboard**: Fully integrated with **Prometheus & Grafana**, providing real-time visibility into capital, active positions, floating PnL, and system health.
+---
 
-## 🏗 Architecture
+## 🏗️ System Architecture
 
-The system is built on a modern Python async stack:
-- **`DataAggregator`**: Connects to multiple API/Websocket sources and normalizes data.
-- **`FeatureStore`**: A thread-safe, in-memory cache that holds the most recent ticks, volume regimes, and order book imbalances (OBI).
-- **`LiveTrader`**: The core execution engine. It polls the `FeatureStore` every 10 seconds, calculates confirmations, manages risk (1x leverage by default), and executes orders.
-- **`RiskManager`**: Ensures daily loss limits and position sizing rules are strictly followed before allowing any trade execution.
+Our platform adopts a decoupled microservices-inspired architecture, separating data ingestion, risk processing, and database storage to eliminate bottlenecks during extreme market volatility.
 
-## 📊 Grafana Integration
+```mermaid
+graph TD
+    subgraph Data Sources
+        B[Binance WS]
+        By[ByBit REST/WS]
+        TV[TradingView TA]
+        YF[Yahoo Finance]
+    end
 
-The bot exposes a Prometheus metrics server on port `8000`. By running the included `docker-compose.yml`, you get a pre-configured Grafana dashboard that monitors:
-- `atomic_live_capital`: Total account capital.
-- `atomic_live_open_positions`: Number of currently active trades.
-- `atomic_live_total_pnl`: Floating/Unrealized PnL of open positions.
+    subgraph Core Engine
+        DA[Data Aggregator]
+        FS[Feature Store]
+        RM[Risk Manager]
+        LT[Live / Paper Trader]
+        EX[Execution Algos]
+    end
 
-## 🚀 Getting Started
+    subgraph Infrastructure
+        TS[(TimescaleDB)]
+        CH[(ClickHouse)]
+        RD[(Redis)]
+        PR[Prometheus]
+        GR[Grafana]
+    end
 
-1. **Clone the repository**:
-   ```bash
-   git clone <your-repo-url>
-   cd crypto-risk-engine
-   ```
+    B --> DA
+    By --> DA
+    TV --> DA
+    YF --> DA
+    
+    DA --> FS
+    DA --> RD
+    FS --> LT
+    
+    LT <--> RM
+    LT --> EX
+    
+    LT --> CH
+    DA --> TS
+    
+    PR --> GR
+    CH --> GR
+```
 
-2. **Install dependencies**:
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
+---
 
-3. **Configure Environment**:
-   Create a `.env` file in the root directory and add your API keys:
-   ```env
-   BINANCE_API_KEY=your_testnet_api_key
-   BINANCE_SECRET=your_testnet_secret
-   # Other keys...
-   ```
+## 🔥 Key Features
 
-4. **Run the Bot**:
-   Use the startup script to prevent system sleep and launch the engine:
-   ```bash
-   ./run.sh
-   ```
+### 1. Advanced Risk Engine (`RiskManager`)
+- **Real-Time Mark-to-Market:** Continuously tracks floating PnL across multiple open positions.
+- **Daily Drawdown Limits & Midnight Resets:** Hard 3% daily loss limit based on Mark-to-Market equity. Baseline automatically resets at UTC midnight via `_maybe_reset_daily()` to avoid false circuit breakers from previous session drawdowns.
+- **Consecutive Loss Pause:** Pauses trading automatically for 1 hour upon 3 consecutive losses.
+- **Stablecoin Depeg Circuit Breaker:** Monitors `USDT/USD` spot pricing in real-time. If USDT drops below `$0.95`, the system triggers an emergency `HALT`, liquidates exposure into fiat, and pauses trading.
 
-## ⚠️ Disclaimer
-This software is for educational purposes only. Do not risk money which you are afraid to lose. USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS.
+### 2. Triple-Confirmation Signal Regime
+Entries require **3 independent confirmations** before capital is deployed:
+1. **Volatility Filter (`vol_regime < 2`):** Bollinger Band Width confirmation (blocks entries during untamed volatility expansions).
+2. **Trend Alignment:** EMA(20) vs EMA(50) directional alignment.
+3. **Order Book Imbalance (OBI) & Momentum:** Aggression delta alignment (`obi > +0.05` for LONG, `obi < -0.05` for SHORT).
+
+### 3. Institutional Database & Observability Stack
+- **TimescaleDB:** Real-time ingestion of OHLCV and tick-level orderbook updates with automated compression policies.
+- **ClickHouse:** High-throughput columnar storage for executed trade logs (`trade_logs`), enabling instant query execution and granular performance analytics.
+- **Redis:** Sub-millisecond in-memory caching for Order Book Imbalances (OBI).
+- **Security Hardened:** All exposed services (Grafana, ClickHouse, Prometheus, Redis) strictly bound to `127.0.0.1` (localhost only) with disabled external CORS embedding.
+
+### 4. Direct Bybit Historical Backtesting Engine
+- Zero bloated third-party dependencies — pulls 6–12 months of 1-hour klines directly from Bybit's Linear API.
+- Simulates the exact live confirmation filters, trailing stops, taker fees (0.04%), slippage (0.05%), and RiskManager circuit breakers.
+- Full offline fallback caching to enable isolated sandbox and CI runs.
+
+---
+
+## 🛠️ Quick Start
+
+### 1. Clone & Configure
+```bash
+git clone https://github.com/EmreCoskuner5/crypto-risk-engine.git
+cd crypto-risk-engine
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+*Configure `.env` with your exchange API keys (see `.env.example`).*
+
+### 2. Launch the Infrastructure
+Bring up the multi-database and observability stack with a single command:
+```bash
+docker-compose up -d
+```
+*(Binds TimescaleDB, ClickHouse, Redis, Prometheus, and Grafana to `127.0.0.1` for local network safety).*
+
+### 3. Run the Backtester (6–12 Months Bybit Data)
+```bash
+# Run 12-month Bybit 1h backtest on BTCUSDT
+python -m atomic_trader.cli backtest --months=12 --symbol=BTCUSDT
+```
+
+### 4. Start Paper or Live Trading
+```bash
+# Paper trading mode
+python -m atomic_trader.cli paper-trade --interval=10
+
+# Live trading on Binance Testnet
+python -m atomic_trader.cli live-trade --interval=10
+```
+
+---
+
+## 🧪 Test Suite
+
+Comprehensive automated test suite covering risk calculations, daily baseline resets, circuit breakers, signal confirmation regimes, and backtesting mechanics.
+
+```bash
+pytest -v tests/
+```
+```text
+============================== 20 passed in 0.34s ==============================
+```
+
+---
+
+## 📈 Observability (Grafana)
+Head over to `http://127.0.0.1:3000` (Default login: `admin` / `admin`).
+The system is pre-provisioned with the **Risk Engine Command Center** dashboard, offering real-time views into:
+- Total floating capital & MTM drawdown
+- Open positions count & exposure
+- Realized PnL & trade logs streaming from ClickHouse
+
+---
+
+## 🛡️ Disclaimer
+This software is for educational and research purposes only. Cryptocurrency trading involves substantial risk of loss. Always test rigorously in simulation before risking capital.

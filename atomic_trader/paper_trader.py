@@ -17,9 +17,9 @@ class AsyncPaperTrader:
         self.metric_total_pnl = Gauge('atomic_total_pnl', 'Total Unrealized PnL')
         
     async def start(self):
-        print(f"{Fore.GREEN}[+] Starting Prometheus Metrics Server on port 8000...{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[+] Starting Prometheus Metrics Server on 127.0.0.1:8000...{Style.RESET_ALL}")
         try:
-            start_http_server(8000)
+            start_http_server(8000, addr="127.0.0.1")
         except Exception as e:
             print(f"{Fore.RED}[!] Could not start metrics server: {e}{Style.RESET_ALL}")
             

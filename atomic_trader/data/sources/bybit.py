@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import ssl
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,11 +19,20 @@ BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_REST = "https://api.bybit.com"
 FUNDING_POLL_INTERVAL = 3600
 
+# Reconnection settings
+WS_RECONNECT_DELAY = 5
+WS_MAX_RECONNECT_DELAY = 60
+WS_RECONNECT_MULTIPLIER = 1.5
+
 
 class BybitSource(DataSourceBase):
     """
     Streams price and order book from Bybit via WebSocket.
     Polls funding rate history via Bybit REST.
+
+    Features:
+    - Automatic reconnection with exponential backoff
+    - Health monitoring
     """
 
     def __init__(self, symbols: list[str] | None = None) -> None:
@@ -28,9 +40,12 @@ class BybitSource(DataSourceBase):
         self.symbols = symbols or ["BTCUSDT", "ETHUSDT"]
         self._ws: Any = None
         self._session: aiohttp.ClientSession | None = None
+        self._reconnect_delay = WS_RECONNECT_DELAY
+        self._running = False
+        self._message_count = 0
+        self._last_message_time: float = 0
 
     async def connect(self) -> None:
-        import ssl
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -45,20 +60,48 @@ class BybitSource(DataSourceBase):
             ping_timeout=10,
             open_timeout=30,
         )
-        # Subscribe to tickers and order books
+        # Subscribe to tickers, order books, and klines
         topics = []
         for sym in self.symbols:
             topics.append(f"tickers.{sym}")
             topics.append(f"orderbook.1.{sym}")
+            topics.append(f"kline.1.{sym}")  # 1-minute klines
         await self._ws.send(json.dumps({"op": "subscribe", "args": topics}))
+        self._running = True
+        self.logger.info(f"Connected to Bybit WS: {len(self.symbols)} symbols")
 
     async def _run_internal(self, bus: DataBus) -> None:
         funding_task = asyncio.create_task(
             self._poll_funding(bus), name="bybit_funding_poll"
         )
+        health_task = asyncio.create_task(
+            self._health_monitor(), name="bybit_health_monitor"
+        )
+
         try:
-            async for raw_msg in self._ws:
-                msg = json.loads(raw_msg)
+            while self._running:
+                try:
+                    raw_msg = await self._ws.recv()
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.logger.warning(f"Bybit WS closed: {e.code} - {e.reason}. Reconnecting...")
+                    await self._reconnect()
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Bybit WS recv error: {e}")
+                    await self._reconnect()
+                    continue
+
+                self._message_count += 1
+                self._last_message_time = time.time()
+
+                try:
+                    msg = json.loads(raw_msg)
+                except json.JSONDecodeError:
+                    self.logger.debug("Invalid JSON from Bybit WS")
+                    continue
+
                 # Skip subscription confirmations and heartbeats
                 if msg.get("op") in ("subscribe", "ping", "pong"):
                     continue
@@ -77,8 +120,66 @@ class BybitSource(DataSourceBase):
                     event = self._parse_orderbook(symbol, payload)
                     if event:
                         await bus.publish(event)
+                elif topic.startswith("kline."):
+                    event = self._parse_kline(symbol, payload)
+                    if event:
+                        await bus.publish(event)
+        except asyncio.CancelledError:
+            pass
         finally:
+            self._running = False
             funding_task.cancel()
+            health_task.cancel()
+            await asyncio.gather(funding_task, health_task, return_exceptions=True)
+
+    async def _reconnect(self) -> None:
+        """Reconnect to WebSocket with exponential backoff."""
+        if not self._running:
+            return
+
+        self.logger.info(f"Reconnecting to Bybit WS in {self._reconnect_delay:.1f}s...")
+        await asyncio.sleep(self._reconnect_delay)
+
+        try:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+            self._ws = await websockets.connect(
+                BYBIT_WS,
+                ssl=ssl_context,
+                ping_interval=20,
+                ping_timeout=10,
+                open_timeout=30,
+            )
+            # Resubscribe
+            topics = []
+            for sym in self.symbols:
+                topics.append(f"tickers.{sym}")
+                topics.append(f"orderbook.1.{sym}")
+                topics.append(f"kline.1.{sym}")
+            await self._ws.send(json.dumps({"op": "subscribe", "args": topics}))
+
+            self._reconnect_delay = WS_RECONNECT_DELAY
+            self.logger.info("Reconnected to Bybit WS successfully")
+        except Exception as e:
+            self.logger.error(f"Bybit reconnection failed: {e}")
+            self._reconnect_delay = min(self._reconnect_delay * WS_RECONNECT_MULTIPLIER, WS_MAX_RECONNECT_DELAY)
+            asyncio.create_task(self._reconnect())
+
+    async def _health_monitor(self) -> None:
+        """Monitor WebSocket health."""
+        while self._running:
+            await asyncio.sleep(30)
+            now = time.time()
+
+            if self._last_message_time > 0:
+                stale_seconds = now - self._last_message_time
+                if stale_seconds > 60:
+                    self.logger.warning(f"Bybit WS stale: no messages for {stale_seconds:.0f}s")
+
+            self.logger.debug(f"Bybit WS health: {self._message_count} msgs/min")
+            self._message_count = 0
 
     # ── Parsers ──────────────────────────────────────────────────────────────
 
@@ -88,7 +189,7 @@ class BybitSource(DataSourceBase):
                 return float(val) if val else default
             except (TypeError, ValueError):
                 return default
-                
+
         data = {}
         if "lastPrice" in d:
             data["price"] = _float(d["lastPrice"])
@@ -106,7 +207,7 @@ class BybitSource(DataSourceBase):
             data["open_interest_value"] = _float(d["openInterestValue"])
         if "price24hPcnt" in d:
             data["price_change_pct_24h"] = _float(d["price24hPcnt"]) * 100
-            
+
         if not data:
             return None
 
@@ -144,11 +245,44 @@ class BybitSource(DataSourceBase):
             },
         )
 
+    def _parse_kline(self, symbol: str, d: Any) -> DataEvent | None:
+        """
+        Parse kline/candlestick data from Bybit for OHLC features.
+        Bybit kline format (v5): {"topic":"kline.1.BTCUSDT","data":[{"start":...,"end":...,"open":"...","high":"...","low":"...","close":"...","volume":"...","turnover":"...","confirm":true}]}
+        """
+        # Bybit v5 sends kline data as a list
+        if isinstance(d, list):
+            if not d:
+                return None
+            d = d[0]  # Take the first (most recent) kline
+
+        if not isinstance(d, dict):
+            return None
+
+        if not d.get("confirm", False):  # Only process closed klines
+            return None
+
+        return DataEvent(
+            source="bybit",
+            event_type="kline",
+            symbol=symbol,
+            timestamp=datetime.now(timezone.utc),
+            data={
+                "open": float(d["open"]),
+                "high": float(d["high"]),
+                "low": float(d["low"]),
+                "close": float(d["close"]),
+                "volume": float(d["volume"]),
+                "turnover": float(d.get("turnover", 0)),
+                "kline_closed": True,
+            },
+        )
+
     # ── Funding Rate Poller ───────────────────────────────────────────────────
 
     async def _poll_funding(self, bus: DataBus) -> None:
         """Poll the latest funding rate from Bybit REST every hour."""
-        while True:
+        while self._running:
             for sym in self.symbols:
                 try:
                     async with self._session.get(
@@ -180,7 +314,17 @@ class BybitSource(DataSourceBase):
             await asyncio.sleep(FUNDING_POLL_INTERVAL)
 
     async def disconnect(self) -> None:
+        self._running = False
         if self._ws:
             await self._ws.close()
         if self._session:
             await self._session.close()
+
+    def get_health(self) -> dict[str, Any]:
+        """Return health metrics for monitoring."""
+        return {
+            "connected": self._ws is not None and self._running,
+            "message_rate_per_min": self._message_count,
+            "last_message_age_sec": time.time() - self._last_message_time if self._last_message_time else None,
+            "reconnect_delay": self._reconnect_delay,
+        }

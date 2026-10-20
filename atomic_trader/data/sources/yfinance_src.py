@@ -24,6 +24,7 @@ class YFinanceSource(DataSourceBase):
         "QQQ",     # Nasdaq ETF
         "BTC-USD", # BTC spot cross-check
         "ETH-USD", # ETH spot
+        "USDT-USD", # Stablecoin Depeg monitor
         "AAPL",    # Example equity
     ]
 
@@ -34,6 +35,8 @@ class YFinanceSource(DataSourceBase):
     async def connect(self) -> None:
         try:
             import yfinance as yf  # noqa: F401
+            import logging
+            logging.getLogger("yfinance").setLevel(logging.CRITICAL)
         except ImportError as exc:
             raise RuntimeError(
                 "yfinance not installed — run: pip install yfinance"

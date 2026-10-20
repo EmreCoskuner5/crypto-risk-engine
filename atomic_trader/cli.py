@@ -176,6 +176,14 @@ def cmd_test_binance(verbose: bool = False) -> None:
     except Exception as e:
         print(f"{Fore.RED}[!] Connection Failed: {e}{Style.RESET_ALL}")
 
+
+def cmd_backtest(months: int = 12, symbol: str = "BTCUSDT", verbose: bool = False) -> None:
+    """Run institutional backtest on Bybit 1h klines matching live signal confirmations."""
+    _setup_logging(verbose)
+    from atomic_trader.backtest.engine import run_benchmark
+    print(f"{Fore.CYAN}[+] Running {months}-Month Backtest on {symbol} (1h timeframe)...{Style.RESET_ALL}")
+    run_benchmark(months=months, symbol=symbol)
+
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -185,6 +193,7 @@ COMMANDS = {
     "live-trade":      (cmd_live_trade,      "Start live trading on Binance Testnet"),
     "test-alpaca":     (cmd_test_alpaca,     "Test Yahoo Finance connection"),
     "test-binance":    (cmd_test_binance,    "Test Binance Testnet API credentials"),
+    "backtest":        (cmd_backtest,        "Run 6-12 month backtest on Bybit 1h klines"),
 }
 
 
@@ -231,6 +240,15 @@ def main() -> None:
         fn(symbol=symbol, verbose=verbose)
     elif command == "test-binance":
         fn(verbose=verbose)
+    elif command == "backtest":
+        months = 12
+        symbol = "BTCUSDT"
+        for arg in args[1:]:
+            if arg.startswith("--months="):
+                months = int(arg.split("=")[1])
+            elif arg.startswith("--symbol="):
+                symbol = arg.split("=")[1]
+        fn(months=months, symbol=symbol, verbose=verbose)
 
 
 if __name__ == "__main__":
