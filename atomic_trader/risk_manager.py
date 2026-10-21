@@ -17,45 +17,50 @@ class RiskManager:
         floating_pnl = sum(p.get('pnl', 0) for p in self.positions.values())
         return self.capital + floating_pnl
 
-    def _maybe_reset_daily(self):
+    def _maybe_reset_daily(self, current_date=None, silent=False):
         """Reset daily baseline at UTC midnight."""
-        today = datetime.now(timezone.utc).date()
+        today = current_date or datetime.now(timezone.utc).date()
         if today > self.last_reset_date:
             mtm_capital = self.get_mark_to_market_capital()
-            print(f"{Fore.CYAN}[RISK MANAGER] New day ({today}) detected. Resetting daily baseline to ${mtm_capital:.2f} (prev: ${self.daily_start_capital:.2f}).{Style.RESET_ALL}")
+            if not silent:
+                print(f"{Fore.CYAN}[RISK MANAGER] New day ({today}) detected. Resetting daily baseline to ${mtm_capital:.2f} (prev: ${self.daily_start_capital:.2f}).{Style.RESET_ALL}")
             self.daily_start_capital = mtm_capital
             self.daily_realized_pnl = 0.0
             self.last_reset_date = today
 
-    def check_daily_loss(self):
+    def check_daily_loss(self, current_date=None, silent=False):
         """3% daily loss = HALT all trading - based on MARK-TO-MARKET (Realized + Floating PnL)"""
-        self._maybe_reset_daily()
+        self._maybe_reset_daily(current_date=current_date, silent=silent)
         mtm_capital = self.get_mark_to_market_capital()
         loss_pct = (self.daily_start_capital - mtm_capital) / self.daily_start_capital
         if loss_pct >= 0.03:
-            floating_pnl = sum(p.get('pnl', 0) for p in self.positions.values())
-            print(f"{Fore.RED}[RISK MANAGER] HALT! Daily 3% loss limit reached (MTM PnL: ${floating_pnl:.2f} | Realized: ${self.daily_realized_pnl:.2f}).{Style.RESET_ALL}")
+            if not silent:
+                floating_pnl = sum(p.get('pnl', 0) for p in self.positions.values())
+                print(f"{Fore.RED}[RISK MANAGER] HALT! Daily 3% loss limit reached (MTM PnL: ${floating_pnl:.2f} | Realized: ${self.daily_realized_pnl:.2f}).{Style.RESET_ALL}")
             return True
         return False
 
-    def update_capital_after_trade(self, pnl):
+    def update_capital_after_trade(self, pnl, current_time=None, silent=False):
         self.capital += pnl
         self.daily_realized_pnl += pnl  # Track realized PnL separately
         if pnl < 0:
             self.consecutive_losses += 1
             if self.consecutive_losses >= 3:
-                print(f"{Fore.RED}[RISK MANAGER] 3 Consecutive Losses! Pausing for 1 hour.")
-                self.halt_until = time.time() + 3600
+                if not silent:
+                    print(f"{Fore.RED}[RISK MANAGER] 3 Consecutive Losses! Pausing for 1 hour.{Style.RESET_ALL}")
+                now_ts = current_time if current_time is not None else time.time()
+                self.halt_until = now_ts + 3600
                 # DON'T reset - keep the count to track pause state
         else:
             self.consecutive_losses = 0
 
-    def can_open_position(self, symbol, expected_rr, direction="LONG"):
+    def can_open_position(self, symbol, expected_rr, direction="LONG", current_time=None, current_date=None, silent=False):
         """Check all risk rules before opening a trade"""
-        if time.time() < self.halt_until:
+        now_ts = current_time if current_time is not None else time.time()
+        if now_ts < self.halt_until:
             return False, "Paused due to consecutive losses"
 
-        if self.check_daily_loss():
+        if self.check_daily_loss(current_date=current_date, silent=silent):
             return False, "Daily loss limit reached"
 
         if len(self.positions) >= 5:

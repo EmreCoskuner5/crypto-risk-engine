@@ -100,6 +100,8 @@ class BacktestEngine:
         self.use_trailing_stop = use_trailing_stop
 
         self.risk_manager = RiskManager(initial_capital=initial_capital)
+        if not self.raw_data.empty and hasattr(self.raw_data.index[0], "date"):
+            self.risk_manager.last_reset_date = self.raw_data.index[0].date()
         self.trades: list[TradeRecord] = []
         self.equity_curve: list[dict[str, Any]] = []
         self.circuit_breaker_halts = 0
@@ -151,17 +153,11 @@ class BacktestEngine:
             trend_regime = row["trend_regime"]
             obi = row["obi"]
 
-            # Update Risk Manager simulated time
-            if hasattr(timestamp, "date"):
-                # Midnight date transition check
-                current_date = timestamp.date()
-                if current_date > self.risk_manager.last_reset_date:
-                    self.risk_manager.daily_start_capital = self.risk_manager.get_mark_to_market_capital()
-                    self.risk_manager.daily_realized_pnl = 0.0
-                    self.risk_manager.last_reset_date = current_date
+            current_date = timestamp.date() if hasattr(timestamp, "date") else None
+            current_time_sec = timestamp.timestamp() if hasattr(timestamp, "timestamp") else time.time()
 
             # Check daily drawdown circuit breaker
-            if self.risk_manager.check_daily_loss():
+            if self.risk_manager.check_daily_loss(current_date=current_date, silent=True):
                 self.circuit_breaker_halts += 1
                 if active_position is not None:
                     # Emergency liquidate
@@ -248,7 +244,12 @@ class BacktestEngine:
                         expected_rr = (current_price - take_profit) / (stop_loss - current_price)
 
                     can_open, _ = self.risk_manager.can_open_position(
-                        self.symbol, expected_rr, direction=direction
+                        self.symbol,
+                        expected_rr,
+                        direction=direction,
+                        current_time=current_time_sec,
+                        current_date=current_date,
+                        silent=True,
                     )
                     if can_open:
                         size = self.risk_manager.calculate_position_size(
@@ -321,7 +322,8 @@ class BacktestEngine:
         total_fees = pos.get("entry_fee", 0.0) + exit_fee
         pnl_pct = (net_pnl / (entry_price * size)) * 100 if entry_price * size > 0 else 0
 
-        self.risk_manager.update_capital_after_trade(net_pnl)
+        timestamp_sec = timestamp.timestamp() if hasattr(timestamp, "timestamp") else None
+        self.risk_manager.update_capital_after_trade(net_pnl, current_time=timestamp_sec, silent=True)
         if self.symbol in self.risk_manager.positions:
             del self.risk_manager.positions[self.symbol]
 
